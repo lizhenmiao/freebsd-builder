@@ -1,0 +1,26 @@
+# Claude Code 工作目录
+.claude/
+
+# 临时文件
+*.tmp
+*.bak
+*.log
+
+# 构建产物
+sub2api
+new-api
+*.tar.gz
+checksums.txt
+
+# 配置文件（由 install.sh 生成）
+redis.conf
+config.yaml
+
+# 运行时文件
+*.pid
+logs/
+redis_data/
+
+# 系统文件
+.DS_Store
+Thumbs.db

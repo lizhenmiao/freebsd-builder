@@ -1,0 +1,63 @@
+name: '创建 Release'
+description: '创建 GitHub Release，生成中英双语说明'
+
+inputs:
+  project_name:
+    description: '项目名称（如 sub2api、new-api，用于标签前缀）'
+    required: true
+  tag:
+    description: 'Release 标签（上游版本号）'
+    required: true
+  upstream_repo:
+    description: '上游仓库地址（如 Wei-Shaw/sub2api）'
+    required: true
+  archive_file:
+    description: 'tar.gz 文件路径'
+    required: true
+  checksums_file:
+    description: '校验和文件路径'
+    required: true
+  repo_owner:
+    description: '当前仓库所有者'
+    required: true
+  repo_name:
+    description: '当前仓库名称'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: 创建 GitHub Release
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        VERSION="${{ inputs.tag }}"
+        VERSION_NUM="${VERSION#v}"
+        ARCHIVE_NAME=$(basename "${{ inputs.archive_file }}")
+
+        # 生成带项目前缀的标签（小写）
+        PROJECT_LOWER=$(echo "${{ inputs.project_name }}" | tr '[:upper:]' '[:lower:]')
+        RELEASE_TAG="${PROJECT_LOWER}-${{ inputs.tag }}"
+
+        # 获取上游 Release Notes
+        UPSTREAM_BODY=$(curl -sf \
+          -H "Authorization: Bearer ${{ github.token }}" \
+          -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/repos/${{ inputs.upstream_repo }}/releases/tags/${{ inputs.tag }}" \
+          | jq -r '.body // ""')
+
+        # 如果没有上游 Release Notes，使用默认说明
+        if [ -z "$UPSTREAM_BODY" ]; then
+          UPSTREAM_BODY="查看上游项目获取更新详情 / See upstream project for details"
+        fi
+
+        # 创建 Release（使用小写前缀的标签）
+        gh release create "$RELEASE_TAG" \
+          --repo "${{ inputs.repo_owner }}/${{ inputs.repo_name }}" \
+          --title "${{ inputs.project_name }} ${{ inputs.tag }} for FreeBSD" \
+          --notes "$UPSTREAM_BODY" \
+          "${{ inputs.archive_file }}" \
+          "${{ inputs.checksums_file }}"
+
+        echo "✅ Release 创建完成: $RELEASE_TAG"

@@ -1,0 +1,124 @@
+name: '检查版本'
+description: '检查上游和本地版本，判断是否需要构建'
+
+inputs:
+  upstream_repo:
+    description: '上游仓库地址（如 Wei-Shaw/sub2api）'
+    required: true
+  project_name:
+    description: '项目名称（如 sub2api，用于标签前缀）'
+    required: true
+  target_version:
+    description: '手动指定版本号（留空则检查最新）'
+    required: false
+    default: ''
+  force_build:
+    description: '强制构建（即使版本相同）'
+    required: false
+    default: 'false'
+
+outputs:
+  upstream_tag:
+    description: '上游版本号'
+    value: ${{ steps.decide.outputs.upstream_tag }}
+  needs_build:
+    description: '是否需要构建'
+    value: ${{ steps.decide.outputs.needs_build }}
+
+runs:
+  using: composite
+  steps:
+    - name: 获取上游最新版本
+      id: upstream
+      shell: bash
+      run: |
+        # 尝试从 releases 获取（适用于有 release 的项目）
+        TAG=$(curl -sf \
+          -H "Authorization: Bearer ${{ github.token }}" \
+          -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/repos/${{ inputs.upstream_repo }}/releases/latest" \
+          | jq -r '.tag_name // empty' 2>/dev/null)
+
+        # 如果没有 release，尝试从 tags 获取
+        if [ -z "$TAG" ]; then
+          TAG=$(curl -sf \
+            "https://api.github.com/repos/${{ inputs.upstream_repo }}/tags?per_page=1" \
+            | jq -r '.[0].name // empty' 2>/dev/null)
+        fi
+
+        if [ -z "$TAG" ]; then
+          echo "❌ 获取上游版本失败" >&2
+          exit 1
+        fi
+
+        echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+        echo "上游最新版本: $TAG"
+
+    - name: 获取本地最新版本（按项目过滤）
+      id: current
+      shell: bash
+      run: |
+        # 调试：输出所有 Release 标签
+        echo "=== 调试：所有 Release 标签 ==="
+        curl -sf \
+          -H "Authorization: Bearer ${{ github.token }}" \
+          -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/repos/${{ github.repository }}/releases?per_page=100" \
+          | jq -r '.[].tag_name'
+        echo "==========================="
+
+        # 获取本仓库所有 releases，过滤出当前项目的标签（大小写不敏感），并按语义化版本排序
+        PROJECT_LOWER=$(echo "${{ inputs.project_name }}" | tr '[:upper:]' '[:lower:]')
+        TAG=$(curl -sf \
+          -H "Authorization: Bearer ${{ github.token }}" \
+          -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/repos/${{ github.repository }}/releases?per_page=100" \
+          | jq -r --arg prefix "${PROJECT_LOWER}-" \
+            '[.[] | select(.tag_name | ascii_downcase | startswith($prefix)) | .tag_name] | .[]' \
+          | sort -rV \
+          | head -n 1)
+
+        echo "=== 调试：过滤项目前缀 ${PROJECT_LOWER}- (大小写不敏感) ==="
+        echo "找到的标签: ${TAG:-<无>}"
+        echo "==========================="
+
+        # 去掉项目前缀，得到纯版本号
+        if [ -n "$TAG" ]; then
+          # 使用项目名精确匹配去掉前缀（支持大小写）
+          VERSION=$(echo "$TAG" | sed -E "s/^${PROJECT_LOWER}-//i")
+        else
+          VERSION=""
+        fi
+
+        echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+        echo "本地最新版本: ${TAG:-<无>} (纯版本号: ${VERSION:-<无>})"
+
+    - name: 决定是否构建
+      id: decide
+      shell: bash
+      run: |
+        UPSTREAM="${{ steps.upstream.outputs.tag }}"
+        CURRENT_VERSION="${{ steps.current.outputs.version }}"
+        TARGET="${{ inputs.target_version }}"
+        FORCE="${{ inputs.force_build }}"
+
+        # 如果手动指定了版本，使用指定版本
+        if [ -n "$TARGET" ]; then
+          echo "upstream_tag=$TARGET" >> "$GITHUB_OUTPUT"
+          echo "needs_build=true" >> "$GITHUB_OUTPUT"
+          echo "✅ 将构建指定版本: $TARGET"
+          exit 0
+        fi
+
+        # 使用上游最新版本
+        echo "upstream_tag=$UPSTREAM" >> "$GITHUB_OUTPUT"
+
+        # 判断是否需要构建（比较纯版本号）
+        if [ "$UPSTREAM" != "$CURRENT_VERSION" ] || [ "$FORCE" = "true" ]; then
+          echo "needs_build=true" >> "$GITHUB_OUTPUT"
+          echo "✅ 需要构建: 上游=$UPSTREAM 本地=${CURRENT_VERSION:-<无>}"
+        else
+          echo "needs_build=false" >> "$GITHUB_OUTPUT"
+          echo "⏭️  已是最新版本 $CURRENT_VERSION，跳过构建"
+        fi
