@@ -140,11 +140,10 @@ is_version_greater() {
 get_available_versions() {
     local count=${1:-5}
 
-    # 使用代理加速访问 GitHub API
-    GITHUB_API_PROXY="https://ghfast.top/"
-    # 加时间戳参数 + no-cache 头，绕过代理对 API 响应的缓存（避免拿到旧版本列表）
-    curl -s -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
-        "${GITHUB_API_PROXY}api.github.com/repos/${GITHUB_REPO}/releases?per_page=100&_=$(date +%s)" \
+    # API 直连 GitHub（ghfast.top 等下载代理不支持 api.github.com，会返回 403）
+    # 版本 JSON 很小，直连即可；下载大文件时才走 GITHUB_PROXY 加速
+    curl -s -H 'Cache-Control: no-cache' \
+        "https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=100" \
         | grep '"tag_name":' \
         | grep 'sub2api-' \
         | cut -d '"' -f 4 \
@@ -1171,11 +1170,8 @@ get_latest_version() {
     # 将提示信息输出到 stderr，避免污染返回值
     print_info "检查最新版本..." >&2
 
-    # 使用代理加速访问 GitHub API
-    GITHUB_API_PROXY="https://ghfast.top/"
-    # 加时间戳参数 + no-cache 头，绕过代理对 API 响应的缓存（避免拿到旧版本）
-    VERSION=$(curl -s -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
-        "${GITHUB_API_PROXY}api.github.com/repos/${GITHUB_REPO}/releases?per_page=100&_=$(date +%s)" \
+    # API 直连 github.com（ghfast.top 代理不支持 api.github.com，会返回 403）
+    VERSION=$(curl -s "https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=100" \
         | grep '"tag_name":' \
         | grep 'sub2api-' \
         | cut -d '"' -f 4 \
