@@ -1,0 +1,127 @@
+name: '检查版本'
+description: '检查上游和本地版本，输出本地缺失的待构建版本列表'
+
+inputs:
+  upstream_repo:
+    description: '上游仓库地址（如 Wei-Shaw/sub2api）'
+    required: true
+  project_name:
+    description: '项目名称（如 sub2api，用于标签前缀）'
+    required: true
+  target_version:
+    description: '手动指定版本号（留空则检查最新）'
+    required: false
+    default: ''
+  force_build:
+    description: '强制构建（即使版本相同）'
+    required: false
+    default: 'false'
+  max_versions:
+    description: '本地落后较多时，最多补构建最近 N 个版本'
+    required: false
+    default: '10'
+
+outputs:
+  versions_json:
+    description: '待构建版本列表（JSON 数组，如 ["v1.2.4","v1.2.3"]）'
+    value: ${{ steps.decide.outputs.versions_json }}
+  needs_build:
+    description: '是否需要构建（列表非空为 true）'
+    value: ${{ steps.decide.outputs.needs_build }}
+
+runs:
+  using: composite
+  steps:
+    - name: 获取上游版本列表
+      id: upstream
+      shell: bash
+      run: |
+        # 优先从 releases 获取（跳过 draft / prerelease），按语义化版本降序
+        UPSTREAM_JSON=$(curl -sf \
+          -H "Authorization: Bearer ${{ github.token }}" \
+          -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/repos/${{ inputs.upstream_repo }}/releases?per_page=100" \
+          | jq -r '[.[] | select(.draft == false and .prerelease == false) | .tag_name] | .[]' 2>/dev/null \
+          | sort -rV \
+          | jq -R . | jq -sc .)
+
+        # 若 releases 为空，回退到 tags
+        if [ -z "$UPSTREAM_JSON" ] || [ "$UPSTREAM_JSON" = "[]" ]; then
+          UPSTREAM_JSON=$(curl -sf \
+            "https://api.github.com/repos/${{ inputs.upstream_repo }}/tags?per_page=100" \
+            | jq -r '.[].name' 2>/dev/null \
+            | sort -rV \
+            | jq -R . | jq -sc .)
+        fi
+
+        if [ -z "$UPSTREAM_JSON" ] || [ "$UPSTREAM_JSON" = "[]" ]; then
+          echo "❌ 获取上游版本失败" >&2
+          exit 1
+        fi
+
+        echo "upstream_json=$UPSTREAM_JSON" >> "$GITHUB_OUTPUT"
+        echo "上游版本列表（降序）: $UPSTREAM_JSON"
+
+    - name: 获取本地已构建版本集合（按项目过滤）
+      id: current
+      shell: bash
+      run: |
+        # 获取本仓库所有 releases，过滤出当前项目前缀（大小写不敏感），去前缀得到纯版本号集合
+        PROJECT_LOWER=$(echo "${{ inputs.project_name }}" | tr '[:upper:]' '[:lower:]')
+        LOCAL_JSON=$(curl -sf \
+          -H "Authorization: Bearer ${{ github.token }}" \
+          -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/repos/${{ github.repository }}/releases?per_page=100" \
+          | jq -r --arg prefix "${PROJECT_LOWER}-" \
+            '[.[] | .tag_name | select(ascii_downcase | startswith($prefix)) | sub("(?i)^" + $prefix; "")]' \
+          | jq -sc 'add // []')
+
+        echo "local_json=$LOCAL_JSON" >> "$GITHUB_OUTPUT"
+        echo "本地已构建版本: $LOCAL_JSON"
+
+    - name: 决定待构建版本列表
+      id: decide
+      shell: bash
+      run: |
+        UPSTREAM_JSON='${{ steps.upstream.outputs.upstream_json }}'
+        LOCAL_JSON='${{ steps.current.outputs.local_json }}'
+        TARGET="${{ inputs.target_version }}"
+        FORCE="${{ inputs.force_build }}"
+        MAX="${{ inputs.max_versions }}"
+
+        # 手动指定版本：只构建该版本
+        if [ -n "$TARGET" ]; then
+          VERSIONS_JSON=$(jq -cn --arg t "$TARGET" '[$t]')
+          echo "versions_json=$VERSIONS_JSON" >> "$GITHUB_OUTPUT"
+          echo "needs_build=true" >> "$GITHUB_OUTPUT"
+          echo "✅ 将构建指定版本: $VERSIONS_JSON"
+          exit 0
+        fi
+
+        # 先取上游最新 MAX 个（窗口），再减去本地已构建的，得到窗口内缺失的版本
+        # 注意顺序：必须"先切后减"。若先减后切，本地已构建最新 N 个后，
+        # 差集里只剩更老的版本，切片会错误地去构建"更老的 N 个"。
+        VERSIONS_JSON=$(jq -cn \
+          --argjson up "$UPSTREAM_JSON" \
+          --argjson local "$LOCAL_JSON" \
+          --argjson max "$MAX" \
+          '($up | .[0:$max]) - $local')
+
+        COUNT=$(echo "$VERSIONS_JSON" | jq 'length')
+
+        # 差集为空但强制构建：回退构建上游最新 1 个
+        if [ "$COUNT" -eq 0 ] && [ "$FORCE" = "true" ]; then
+          VERSIONS_JSON=$(echo "$UPSTREAM_JSON" | jq -c '.[0:1]')
+          COUNT=$(echo "$VERSIONS_JSON" | jq 'length')
+          echo "🔁 强制构建，回退到上游最新版本"
+        fi
+
+        if [ "$COUNT" -gt 0 ]; then
+          echo "versions_json=$VERSIONS_JSON" >> "$GITHUB_OUTPUT"
+          echo "needs_build=true" >> "$GITHUB_OUTPUT"
+          echo "✅ 需要构建 $COUNT 个版本: $VERSIONS_JSON"
+        else
+          echo "versions_json=[]" >> "$GITHUB_OUTPUT"
+          echo "needs_build=false" >> "$GITHUB_OUTPUT"
+          echo "⏭️  已是最新，无需构建"
+        fi

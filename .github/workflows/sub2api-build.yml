@@ -1,0 +1,142 @@
+name: Sub2API FreeBSD 自动构建
+
+on:
+  push:
+    paths:
+      - '.github/workflows/sub2api-build.yml'
+  schedule:
+    - cron: '0 18 * * *'  # 每天 18:00 UTC（北京时间凌晨 2:00）
+  workflow_dispatch:
+    inputs:
+      target_version:
+        description: '指定版本号（留空=检查最新版本）'
+        required: false
+        default: ''
+        type: string
+      force_build:
+        description: '强制构建（即使版本相同）'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM_REPO: Wei-Shaw/sub2api
+  PROJECT_NAME: sub2api
+
+jobs:
+  check:
+    name: 检查版本
+    runs-on: ubuntu-latest
+    outputs:
+      versions_json: ${{ steps.check.outputs.versions_json }}
+      needs_build: ${{ steps.check.outputs.needs_build }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v6
+
+      - name: 检查版本
+        id: check
+        uses: ./.github/actions/check-version
+        with:
+          upstream_repo: ${{ env.UPSTREAM_REPO }}
+          project_name: ${{ env.PROJECT_NAME }}
+          target_version: ${{ inputs.target_version }}
+          force_build: ${{ inputs.force_build }}
+
+  build:
+    name: 构建并发布 ${{ matrix.version }}
+    needs: check
+    if: needs.check.outputs.needs_build == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJson(needs.check.outputs.versions_json) }}
+    env:
+      UPSTREAM_TAG: ${{ matrix.version }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v6
+
+      - name: 克隆上游源码
+        run: |
+          git clone --depth 1 --branch "${{ env.UPSTREAM_TAG }}" \
+            "https://github.com/${{ env.UPSTREAM_REPO }}.git" source
+          echo "✅ 克隆完成: ${{ env.UPSTREAM_TAG }}"
+
+      - name: 设置 Node.js 和 pnpm
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+
+      - name: 安装 pnpm
+        run: npm install -g pnpm@9
+
+      - name: 构建前端
+        run: |
+          cd source/frontend
+          pnpm install --frozen-lockfile
+          pnpm run build
+          echo "✅ 前端构建完成"
+
+      - name: 构建 FreeBSD 后端
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          release: 13.2
+          prepare: |
+            pkg install -y curl git gcc bash gawk gsed
+            # 安装 Go
+            fetch https://dl.google.com/go/go1.23.4.freebsd-amd64.tar.gz
+            tar -C /usr/local -xzf go1.23.4.freebsd-amd64.tar.gz
+            rm go1.23.4.freebsd-amd64.tar.gz
+            ln -sf /usr/local/go/bin/go /usr/local/bin/go
+          run: |
+            set -e
+            git config --global --add safe.directory '*'
+            cd source
+
+            # 设置版本信息
+            VERSION="${{ env.UPSTREAM_TAG }}"
+            VERSION="${VERSION#v}"
+            echo "$VERSION" > backend/cmd/server/VERSION
+            echo "✅ VERSION: $VERSION"
+
+            # 构建后端
+            echo "构建后端..."
+            cd backend
+            COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+            DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+            go build \
+              -tags=embed \
+              -ldflags="-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.Date=${DATE} -X main.BuildType=release" \
+              -trimpath \
+              -o ../sub2api \
+              ./cmd/server
+
+            cd ..
+            echo "✅ 构建完成"
+            ls -lh sub2api
+
+      - name: 打包 Release
+        uses: ./.github/actions/package-release
+        with:
+          project_name: ${{ env.PROJECT_NAME }}
+          version: ${{ env.UPSTREAM_TAG }}
+          binary_path: source/sub2api
+          source_dir: source
+
+      - name: 创建 Release
+        uses: ./.github/actions/create-release
+        with:
+          project_name: Sub2API
+          tag: ${{ env.UPSTREAM_TAG }}
+          upstream_repo: ${{ env.UPSTREAM_REPO }}
+          archive_file: sub2api_${{ env.UPSTREAM_TAG }}_freebsd_amd64.tar.gz
+          checksums_file: checksums.txt
+          repo_owner: lizhenmiao
+          repo_name: freebsd-builder

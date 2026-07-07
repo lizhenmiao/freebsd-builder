@@ -1,0 +1,153 @@
+name: New-API FreeBSD 自动构建
+
+on:
+  push:
+    paths:
+      - '.github/workflows/new-api-build.yml'
+  schedule:
+    - cron: '0 18 * * *'  # 每天 18:00 UTC（北京时间凌晨 2:00）
+  workflow_dispatch:
+    inputs:
+      target_version:
+        description: '指定版本号（留空=检查最新版本）'
+        required: false
+        default: ''
+        type: string
+      force_build:
+        description: '强制构建（即使版本相同）'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM_REPO: QuantumNous/new-api
+  PROJECT_NAME: new-api
+
+jobs:
+  check:
+    name: 检查版本
+    runs-on: ubuntu-latest
+    outputs:
+      versions_json: ${{ steps.check.outputs.versions_json }}
+      needs_build: ${{ steps.check.outputs.needs_build }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v6
+
+      - name: 检查版本
+        id: check
+        uses: ./.github/actions/check-version
+        with:
+          upstream_repo: ${{ env.UPSTREAM_REPO }}
+          project_name: ${{ env.PROJECT_NAME }}
+          target_version: ${{ inputs.target_version }}
+          force_build: ${{ inputs.force_build }}
+
+  build:
+    name: 构建并发布 ${{ matrix.version }}
+    needs: check
+    if: needs.check.outputs.needs_build == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJson(needs.check.outputs.versions_json) }}
+    env:
+      UPSTREAM_TAG: ${{ matrix.version }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v6
+
+      - name: 设置 Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: 克隆上游源码
+        run: |
+          git clone --depth 1 --branch "${{ env.UPSTREAM_TAG }}" \
+            "https://github.com/${{ env.UPSTREAM_REPO }}.git" source
+          echo "✅ 克隆完成: ${{ env.UPSTREAM_TAG }}"
+
+      - name: 构建前端（default）
+        env:
+          CI: ""
+          NODE_OPTIONS: "--max-old-space-size=4096"
+        run: |
+          # 兼容两种结构：新版 web/ 为 bun workspace（根有 package.json）；
+          # 旧版（如 rc.10 及以前）web/default 为独立包，各自有 package.json
+          if [ -f source/web/package.json ]; then
+            echo "检测到 workspace 结构（web/package.json 存在）"
+            cd source/web
+            bun install --frozen-lockfile
+            cd default
+          else
+            echo "检测到旧版独立包结构（web/default 自带 package.json）"
+            cd source/web/default
+            bun install --frozen-lockfile
+          fi
+          DISABLE_ESLINT_PLUGIN='true' VITE_REACT_APP_VERSION="${{ env.UPSTREAM_TAG }}" bun run build
+          echo "✅ default 前端构建完成"
+
+      - name: 构建前端（classic）
+        env:
+          CI: ""
+        run: |
+          # 兼容两种结构：新版 workspace 用 --filter 单独装 classic；旧版 classic 为独立包
+          if [ -f source/web/package.json ]; then
+            echo "检测到 workspace 结构"
+            cd source/web
+            bun install --filter ./classic --frozen-lockfile
+            cd classic
+          else
+            echo "检测到旧版独立包结构"
+            cd source/web/classic
+            bun install --frozen-lockfile
+          fi
+          VITE_REACT_APP_VERSION="${{ env.UPSTREAM_TAG }}" bun run build
+          echo "✅ classic 前端构建完成"
+
+      - name: 构建 FreeBSD 后端
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          release: 13.2
+          prepare: |
+            pkg install -y jq curl git gcc bash gawk gsed
+            # 安装 Go
+            fetch https://dl.google.com/go/go1.25.6.freebsd-amd64.tar.gz
+            tar -C /usr/local -xzf go1.25.6.freebsd-amd64.tar.gz
+            rm go1.25.6.freebsd-amd64.tar.gz
+            ln -sf /usr/local/go/bin/go /usr/local/bin/go
+          run: |
+            set -e
+            git config --global --add safe.directory '*'
+            cd source
+            go mod download
+            go build \
+              -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=${{ env.UPSTREAM_TAG }}' -extldflags '-static'" \
+              -o new-api
+            echo "✅ 后端构建完成"
+            ls -lh new-api
+
+      - name: 打包 Release
+        uses: ./.github/actions/package-release
+        with:
+          project_name: ${{ env.PROJECT_NAME }}
+          version: ${{ env.UPSTREAM_TAG }}
+          binary_path: source/new-api
+          source_dir: source
+
+      - name: 创建 Release
+        uses: ./.github/actions/create-release
+        with:
+          project_name: New-API
+          tag: ${{ env.UPSTREAM_TAG }}
+          upstream_repo: ${{ env.UPSTREAM_REPO }}
+          archive_file: new-api_${{ env.UPSTREAM_TAG }}_freebsd_amd64.tar.gz
+          checksums_file: checksums.txt
+          repo_owner: lizhenmiao
+          repo_name: freebsd-builder

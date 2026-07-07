@@ -1,0 +1,84 @@
+name: '打包 Release'
+description: '打包二进制文件为 tar.gz，包含 LICENSE 和 README.md'
+
+inputs:
+  project_name:
+    description: '项目名称（如 sub2api、new-api）'
+    required: true
+  version:
+    description: '版本号（如 v0.1.137 或 0.1.137）'
+    required: true
+  binary_path:
+    description: '二进制文件路径'
+    required: true
+  source_dir:
+    description: '源码目录（用于获取 LICENSE 和 README.md）'
+    required: true
+
+outputs:
+  archive_name:
+    description: '生成的 tar.gz 文件名'
+    value: ${{ steps.package.outputs.archive_name }}
+  archive_path:
+    description: '生成的 tar.gz 文件路径'
+    value: ${{ steps.package.outputs.archive_path }}
+
+runs:
+  using: composite
+  steps:
+    - name: 打包文件
+      id: package
+      shell: bash
+      run: |
+        # 使用完整版本号（保留 v 前缀）
+        VERSION="${{ inputs.version }}"
+
+        # 定义文件名
+        ARCHIVE_NAME="${{ inputs.project_name }}_${VERSION}_freebsd_amd64.tar.gz"
+
+        # 收集要打包的文件
+        FILES=()
+
+        # 二进制文件（必须存在）
+        if [ ! -f "${{ inputs.binary_path }}" ]; then
+          echo "❌ 二进制文件不存在: ${{ inputs.binary_path }}" >&2
+          exit 1
+        fi
+        FILES+=("${{ inputs.binary_path }}")
+
+        # LICENSE（如果存在）
+        if [ -f "${{ inputs.source_dir }}/LICENSE" ]; then
+          cp "${{ inputs.source_dir }}/LICENSE" ./LICENSE
+          FILES+=("LICENSE")
+          echo "✅ 包含 LICENSE"
+        else
+          echo "⚠️  未找到 LICENSE"
+        fi
+
+        # README.md（如果存在）
+        if [ -f "${{ inputs.source_dir }}/README.md" ]; then
+          cp "${{ inputs.source_dir }}/README.md" ./README.md
+          FILES+=("README.md")
+          echo "✅ 包含 README.md"
+        else
+          echo "⚠️  未找到 README.md"
+        fi
+
+        # 打包
+        echo "打包文件: ${FILES[@]}"
+        tar -czf "$ARCHIVE_NAME" "${FILES[@]}"
+
+        if [ ! -f "$ARCHIVE_NAME" ]; then
+          echo "❌ 打包失败" >&2
+          exit 1
+        fi
+
+        # 生成校验和
+        sha256sum "$ARCHIVE_NAME" > checksums.txt
+
+        echo "✅ 打包完成: $ARCHIVE_NAME"
+        ls -lh "$ARCHIVE_NAME"
+
+        # 输出
+        echo "archive_name=$ARCHIVE_NAME" >> "$GITHUB_OUTPUT"
+        echo "archive_path=$(pwd)/$ARCHIVE_NAME" >> "$GITHUB_OUTPUT"
