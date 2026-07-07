@@ -204,7 +204,7 @@ select_version_for_install() {
         return 0
     fi
 
-    print_info "获取可用版本..."
+    print_info "获取可用版本..." >&2
 
     VERSIONS=$(get_available_versions 5)
 
@@ -213,25 +213,26 @@ select_version_for_install() {
         return 1
     fi
 
-    echo ""
-    printf "${COLOR_CYAN}可用版本：${COLOR_RESET}\n"
-    echo "  0) 最新版本（推荐）"
+    # 菜单展示走 stderr，避免被调用处的 $(...) 命令替换吞掉（只有选中的版本号留在 stdout）
+    echo "" >&2
+    printf "${COLOR_CYAN}可用版本：${COLOR_RESET}\n" >&2
 
     i=1
     echo "$VERSIONS" | while read -r version; do
-        echo "  $i) $version"
+        echo "  $i) $version" >&2
         i=$((i + 1))
     done
-    echo "  6) 自定义版本号"
-    echo ""
+    echo "  6) 自定义版本号" >&2
+    echo "  0) 退出安装" >&2
+    echo "" >&2
 
     while true; do
         read -p "请选择 [0-6]: " choice
 
         case $choice in
             0)
-                echo "$VERSIONS" | head -n 1
-                return 0
+                print_info "已退出安装" >&2
+                return 2
                 ;;
             [1-5])
                 selected=$(echo "$VERSIONS" | sed -n "${choice}p")
@@ -289,7 +290,7 @@ select_version_for_update() {
         return 0
     fi
 
-    print_info "获取可用更新..."
+    print_info "获取可用更新..." >&2
 
     VERSIONS=$(get_newer_versions "$current_version" 5)
 
@@ -298,25 +299,26 @@ select_version_for_update() {
         return 1
     fi
 
-    echo ""
-    printf "${COLOR_CYAN}可更新版本：${COLOR_RESET}\n"
-    echo "  0) 最新版本（推荐）"
+    # 菜单展示走 stderr，避免被调用处的 $(...) 命令替换吞掉（只有选中的版本号留在 stdout）
+    echo "" >&2
+    printf "${COLOR_CYAN}可更新版本：${COLOR_RESET}\n" >&2
 
     i=1
     echo "$VERSIONS" | while read -r version; do
-        echo "  $i) $version"
+        echo "  $i) $version" >&2
         i=$((i + 1))
     done
-    echo "  6) 自定义版本号"
-    echo ""
+    echo "  6) 自定义版本号" >&2
+    echo "  0) 退出更新" >&2
+    echo "" >&2
 
     while true; do
         read -p "请选择 [0-6]: " choice
 
         case $choice in
             0)
-                echo "$VERSIONS" | head -n 1
-                return 0
+                print_info "已退出更新" >&2
+                return 2
                 ;;
             [1-5])
                 selected=$(echo "$VERSIONS" | sed -n "${choice}p")
@@ -843,9 +845,17 @@ appendonly no
 EOF
     print_success "Redis 配置文件生成完成"
 
-    # 选择版本并下载
+    # 选择版本并下载（临时关闭 set -e 允许函数返回非 0）
+    set +e
     SELECTED_VERSION=$(select_version_for_install)
-    if [ $? -ne 0 ] || [ -z "$SELECTED_VERSION" ]; then
+    select_result=$?
+    set -e
+
+    if [ $select_result -eq 2 ]; then
+        # 用户主动退出安装
+        return
+    fi
+    if [ $select_result -ne 0 ] || [ -z "$SELECTED_VERSION" ]; then
         print_error "版本选择失败"
         exit 1
     fi
