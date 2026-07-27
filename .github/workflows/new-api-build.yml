@@ -72,38 +72,51 @@ jobs:
             "https://github.com/${{ env.UPSTREAM_REPO }}.git" source
           echo "✅ 克隆完成: ${{ env.UPSTREAM_TAG }}"
 
-      - name: 构建前端（default）
+      - name: 构建主前端
         env:
           CI: ""
           NODE_OPTIONS: "--max-old-space-size=4096"
         run: |
-          # 兼容两种结构：新版 web/ 为 bun workspace（根有 package.json）；
-          # 旧版（如 rc.10 及以前）web/default 为独立包，各自有 package.json
-          if [ -f source/web/package.json ]; then
-            echo "检测到 workspace 结构（web/package.json 存在）"
+          # 兼容三种结构：单一 web/ 应用（v0.x 及当前版）、
+          # default/classic workspace，以及 default/classic 独立包。
+          if [ -f source/web/default/package.json ]; then
+            if [ -f source/web/package.json ]; then
+              echo "检测到 default/classic workspace 结构"
+              cd source/web
+              bun install --frozen-lockfile
+              cd default
+            else
+              echo "检测到旧版独立包结构（web/default 自带 package.json）"
+              cd source/web/default
+              bun install --frozen-lockfile
+            fi
+          elif [ -f source/web/package.json ]; then
+            echo "检测到单一 web 应用结构"
             cd source/web
             bun install --frozen-lockfile
-            cd default
           else
-            echo "检测到旧版独立包结构（web/default 自带 package.json）"
-            cd source/web/default
-            bun install --frozen-lockfile
+            echo "::error::无法识别上游前端目录结构"
+            exit 1
           fi
           DISABLE_ESLINT_PLUGIN='true' VITE_REACT_APP_VERSION="${{ env.UPSTREAM_TAG }}" bun run build
-          echo "✅ default 前端构建完成"
+          echo "✅ 主前端构建完成"
 
-      - name: 构建前端（classic）
+      - name: 构建前端（classic，如存在）
         env:
           CI: ""
         run: |
-          # 兼容两种结构：新版 workspace 用 --filter 单独装 classic；旧版 classic 为独立包
+          # 当前版已移除 classic；仅旧标签存在该包时才构建。
+          if [ ! -f source/web/classic/package.json ]; then
+            echo "未检测到 classic 前端，跳过"
+            exit 0
+          fi
           if [ -f source/web/package.json ]; then
-            echo "检测到 workspace 结构"
+            echo "检测到 workspace 中的 classic 包"
             cd source/web
             bun install --filter ./classic --frozen-lockfile
             cd classic
           else
-            echo "检测到旧版独立包结构"
+            echo "检测到旧版独立包结构（web/classic 自带 package.json）"
             cd source/web/classic
             bun install --frozen-lockfile
           fi
