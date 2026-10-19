@@ -86,7 +86,7 @@ jobs:
         uses: vmactions/freebsd-vm@v1
         with:
           usesh: true
-          release: 13.2
+          release: "14"
           prepare: |
             pkg install -y curl git gcc bash gawk gsed
             # 安装 Go
