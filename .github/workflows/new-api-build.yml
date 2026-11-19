@@ -129,6 +129,14 @@ jobs:
           usesh: true
           release: "14"
           prepare: |
+            # pkg 仓库指向 USTC 镜像
+            mkdir -p /etc/pkg
+            cat > /etc/pkg/FreeBSD.conf <<'EOF'
+            FreeBSD: {
+              url: "https://mirrors.ustc.edu.cn/freebsd-pkg/${ABI}/latest",
+              enabled: yes
+            }
+            EOF
             pkg install -y jq curl git gcc bash gawk gsed
             # 安装 Go
             fetch https://dl.google.com/go/go1.25.6.freebsd-amd64.tar.gz
